@@ -1,17 +1,11 @@
 {
-  "domain": "stream_assist",
-  "name": "Stream Assist",
-  "codeowners": [
-    "@AlexxIT"
-  ],
-  "config_flow": true,
-  "dependencies": [
-    "stream",
-    "assist_pipeline"
-  ],
-  "documentation": "https://github.com/AlexxIT/StreamAssist",
-  "iot_class": "calculated",
-  "issue_tracker": "https://github.com/AlexxIT/StreamAssist/issues",
-  "requirements": [],
-  "version": "v2.1.0"
-}
+    "domain": "stream_assist",
+    "name": "Stream Assist",
+    "version": "v1.0.0",
+    "documentation": "https://github.com/Steven-Low/stream_assist",
+    "requirements": ["av", "google-genai"],
+    "codeowners": ["@Steven-Low"],
+    "config_flow": true,
+    "iot_class": "local_push"
+
+  }

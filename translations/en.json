@@ -1,29 +1,30 @@
 {
   "config": {
-    "error": {
-    },
     "step": {
       "user": {
         "data": {
-          "name": "Name",
-          "stream_source": "Stream URL (RTSP/RTMP/HTTP)",
-          "camera_entity_id": "Camera Entity"
-        },
-        "description": "Select camera `entity_id` or stream `source`"
-      }
-    }
-  },
-  "options": {
-    "step": {
-      "init": {
-        "data": {
-          "stream_source": "Stream URL (RTSP/RTMP/HTTP)",
-          "camera_entity_id": "Camera Entity",
-          "player_entity_id": "Player Entity",
-          "stt_start_media": "STT start media",
-          "pipeline_id": "Pipeline (Settings > Voice Assistant)"
+          "url": "Url",
+          "api_key": "Api Key"
+
         }
+      }
+
+    },
+    "error": {
+      "cannot_connect": "Failed to connect"
+    }
+
+  },
+  "entity": {
+
+    "switch": {
+      "mute": {
+        "name": "Mute"
+      },
+      "power": {
+        "name": "Power"
       }
     }
   }
+
 }

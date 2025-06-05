@@ -1,70 +1,79 @@
-import logging
-
+from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, ServiceResponse, SupportsResponse, ServiceCall
-from homeassistant.helpers.device_registry import DeviceEntry
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.helpers import config_validation as cv, device_registry as dr
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.entity_platform import async_get_platforms
+from homeassistant.const import Platform
 
-from .core import DOMAIN, get_stream_source, assist_run, stream_run
-from .core.stream import Stream
+import logging
+from .const import DOMAIN
+from .audio_processor import StreamAssistSatellite
+from .models import DomainDataItem
+from .devices import StreamAssistDevice
 
+CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = (Platform.SENSOR, Platform.SWITCH)
+SATELLITE_PLATFORMS = [
+    Platform.SWITCH,
+]
 
 
-async def async_setup(hass: HomeAssistant, config: ConfigType):
-    async def run(call: ServiceCall) -> ServiceResponse:
-        stt_stream = Stream()
+__all__ = [
+    "DOMAIN",
+    "async_setup",
+    "async_setup_entry",
+    "async_unload_entry",
+]
 
-        try:
-            coro = stream_run(hass, call.data, stt_stream=stt_stream)
-            hass.async_create_task(coro)
 
-            return await assist_run(
-                hass, call.data, context=call.context, stt_stream=stt_stream
-            )
-        except Exception as e:
-            _LOGGER.error("stream_assist.run", exc_info=e)
-            return {"error": {"type": str(type(e)), "message": str(e)}}
-        finally:
-            stt_stream.close()
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Initial setup of the integration."""
+    return True
 
-    hass.services.async_register(
-        DOMAIN, "run", run, supports_response=SupportsResponse.OPTIONAL
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> bool:
+    """Directly set up the Stream Assist entity without platform forwarding."""
+
+    item = DomainDataItem()
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = item
+    entry.async_on_unload(entry.add_update_listener(update_listener))
+
+    # Create device in the device registry
+    dev_reg = dr.async_get(hass)
+    processor_id = entry.entry_id
+    device = dev_reg.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, processor_id)},
+        name="satellite_info.name",  # Replace with real config if needed
+        suggested_area="Bedroom",
     )
 
+    # Store device information
+    item.device = StreamAssistDevice(
+        processor_id=processor_id,
+        device_id=device.id,
+    )
+    # Set up satellite entity, sensors, switches, etc.
+    await hass.config_entries.async_forward_entry_setups(entry, SATELLITE_PLATFORMS)
+
+    stream = StreamAssistSatellite(hass, item.device, entry)
+
+
     return True
 
 
-async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
-    if config_entry.data:
-        hass.config_entries.async_update_entry(
-            config_entry, data={}, options=config_entry.data
-        )
+async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
+    """Handle updates to config entry options."""
+    await hass.config_entries.async_reload(entry.entry_id)
 
-    if not config_entry.update_listeners:
-        config_entry.add_update_listener(async_update_options)
 
-    await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
-
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload the config entry and clean up."""
+    if entry.entry_id in hass.data.get(DOMAIN, {}):
+        del hass.data[DOMAIN][entry.entry_id]
     return True
-
-
-async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry):
-    return await hass.config_entries.async_unload_platforms(config_entry, PLATFORMS)
-
-
-async def async_update_options(hass: HomeAssistant, config_entry: ConfigEntry):
-    await hass.config_entries.async_reload(config_entry.entry_id)
-
-
-async def async_remove_config_entry_device(
-    hass: HomeAssistant, config_entry: ConfigEntry, device_entry: DeviceEntry
-) -> bool:
-    return True
-
-
-async def async_remove_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> None:
-    pass

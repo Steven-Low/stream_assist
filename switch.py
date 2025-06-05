@@ -1,78 +1,104 @@
-import logging
-from typing import Callable
+"""Wyoming switch entities."""
 
-from homeassistant.components.assist_pipeline import PipelineEvent, PipelineEventType
-from homeassistant.components.switch import SwitchEntity
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import STATE_ON, EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers import restore_state
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .core import run_forever, init_entity, EVENTS
+from .const import DOMAIN
+from .entity import StreamAssistEntity
 
-_LOGGER = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from .models import DomainDataItem
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    async_add_entities([StreamAssistSwitch(config_entry)])
+    """Set up VoIP switch entities."""
+    item: DomainDataItem = hass.data[DOMAIN][config_entry.entry_id]
+
+    # Setup is only forwarded for satellites
+    assert item.device is not None
+
+    async_add_entities([
+        StreamAssistMuteSwitch(item.device),
+        StreamAssistPowerSwitch(item.device)
+
+    ])
 
 
-class StreamAssistSwitch(SwitchEntity):
-    on_close: Callable = None
+class StreamAssistMuteSwitch(
+    StreamAssistEntity, restore_state.RestoreEntity, SwitchEntity
+):
+    """Entity to represent if satellite is muted."""
 
-    def __init__(self, config_entry: ConfigEntry):
-        self._attr_is_on = False
-        self._attr_should_poll = False
-
-        self.options = config_entry.options.copy()
-        self.uid = init_entity(self, "mic", config_entry)
-
-    def event_callback(self, event: PipelineEvent):
-        # Event type: wake_word-start, wake_word-end
-        # Error code: wake-word-timeout, wake-provider-missing, wake-stream-failed
-        code = (
-            event.data["code"]
-            if event.type == PipelineEventType.ERROR
-            else event.type.replace("_word", "")
-        )
-
-        name, state = code.split("-", 1)
-
-        async_dispatcher_send(self.hass, f"{self.uid}-{name}", state, event.data)
+    entity_description = SwitchEntityDescription(
+        key="mute",
+        translation_key="mute",
+        entity_category=EntityCategory.CONFIG,
+    )
 
     async def async_added_to_hass(self) -> None:
-        self.options["assist"] = {"device_id": self.device_entry.id}
+        """Call when entity about to be added to hass."""
+        await super().async_added_to_hass()
 
-    async def async_turn_on(self) -> None:
-        if self._attr_is_on:
-            return
+        state = await self.async_get_last_state()
 
+        # Default to off
+        self._attr_is_on = (state is not None) and (state.state == STATE_ON)
+        self._device.set_is_muted(self._attr_is_on)
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Turn on."""
         self._attr_is_on = True
-        self._async_write_ha_state()
+        self.async_write_ha_state()
+        self._device.set_is_muted(True)
 
-        for event in EVENTS:
-            async_dispatcher_send(self.hass, f"{self.uid}-{event}", None)
-
-        self.on_close = run_forever(
-            self.hass,
-            self.options,
-            context=self._context,
-            event_callback=self.event_callback,
-        )
-
-    async def async_turn_off(self) -> None:
-        if not self._attr_is_on:
-            return
-
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn off."""
         self._attr_is_on = False
-        self._async_write_ha_state()
+        self.async_write_ha_state()
+        self._device.set_is_muted(False)
 
-        self.on_close()
 
-    async def async_will_remove_from_hass(self) -> None:
-        if self._attr_is_on:
-            self.on_close()
+class StreamAssistPowerSwitch(
+    StreamAssistEntity, restore_state.RestoreEntity, SwitchEntity
+):
+    """Entity to represent if satellite is muted."""
+
+    entity_description = SwitchEntityDescription(
+        key="power",
+        translation_key="power",
+        entity_category=EntityCategory.CONFIG,
+    )
+
+    async def async_added_to_hass(self) -> None:
+        """Call when entity about to be added to hass."""
+        await super().async_added_to_hass()
+
+        state = await self.async_get_last_state()
+
+        # Default to off
+        self._attr_is_on = (state is not None) and (state.state == STATE_ON)
+        self._device.set_is_active(self._attr_is_on)
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Turn on."""
+        self._attr_is_on = True
+        self.async_write_ha_state()
+        self._device.set_is_active(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn off."""
+        self._attr_is_on = False
+        self.async_write_ha_state()
+        self._device.set_is_active(False)
