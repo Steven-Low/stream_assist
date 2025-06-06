@@ -10,12 +10,9 @@ import wave
 from datetime import datetime, timedelta
 from functools import partial
 import google.genai as genai
-import time
 
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.device_registry import DeviceInfo
 
 from .const import SAMPLE_CHANNELS, SAMPLE_RATE, SAMPLE_WIDTH, DOMAIN, CONF_CHAT_MODEL
 from .devices import StreamAssistDevice
@@ -64,12 +61,19 @@ class StreamAssistSatellite():
 
     def _muted_changed(self) -> None:
         """Run when device muted status changes."""
+
         if self.device.is_muted:
-            self._muted_changed_event.set()
+            self._audio_queue.put_nowait(None)
             _LOGGER.info("<====== Audio Pipeline muted =====>")
         else:
-            self._muted_changed_event.clear()
             _LOGGER.info("<====== Audio Pipeline unmuted =====>")
+
+        self._muted_changed_event.set()
+        self._muted_changed_event.clear()
+
+    async def on_muted(self) -> None:
+        """Block until device may be unmuted again."""
+        await self._muted_changed_event.wait()
 
     def _power_changed(self) -> None:
         """Run when device power status changes."""
@@ -140,25 +144,9 @@ class StreamAssistSatellite():
                     _LOGGER.info("Send task: Not running or session invalid. Exiting.")
                     break
 
-                if self.device.is_muted:
+                while self.device.is_muted:
                     _LOGGER.info("Send task: Muted. Waiting for unmute or stop.")
-                    # Wait for either unmute or stop event
-                    unmuted_event_task = self.hass.async_create_task(self._muted_changed_event.wait())
-                    stop_event_task = self.hass.async_create_task(self._stop_event.wait())
-                    done, pending = await asyncio.wait(
-                        {unmuted_event_task, stop_event_task},
-                        return_when=asyncio.FIRST_COMPLETED
-                    )
-                    for task in pending:
-                        task.cancel() # Cancel the other waiting task
-
-                    if stop_event_task in done or self._stop_event.is_set():
-                        _LOGGER.info("Send task: Stop event received while muted. Exiting.")
-                        break
-                    if unmuted_event_task in done:
-                        self._muted_changed_event.clear() # Reset for next mute
-                        _LOGGER.info("Send task: Unmuted. Resuming.")
-                        continue
+                    await self.on_muted()
 
                 try:
                     msg = await asyncio.wait_for(self._audio_queue.get(), timeout=1.0)
@@ -198,12 +186,8 @@ class StreamAssistSatellite():
 
             for frame in self.container.decode(audio=0):
                 if self._stop_event.is_set() or not self.is_running:
-                    _LOGGER.info("Stopping blocking audio capture loop due to stop signal.")
+                    _LOGGER.info("Stopping blocking audio capture loop due to muted/stop signal.")
                     break
-
-                if self.device.is_muted:
-                    time.sleep(0.01)
-                    continue
 
                 resampled_frames = self.audio_resampler.resample(frame)
 
@@ -226,61 +210,59 @@ class StreamAssistSatellite():
                         try:
                             future.result(timeout=2) # Wait for put to complete within 2s
                         except asyncio.QueueFull:
-                            _LOGGER.warning("Audio queue full, dropping audio chunk")
+                            _LOGGER.warning("Audio Capture Loop: Audio queue full dropping audio chunk")
                         except asyncio.TimeoutError:
-                            _LOGGER.warning("Timeout putting audio chunk on queue. Stopping capture.")
-                            self._stop_event.set() # Signal stop
-                            break
+                            _LOGGER.warning("Audio Capture Loop: Timeout putting audio chunk on queue.")
+                            return
                         except Exception as e_put:
-                            _LOGGER.error(f"Error putting audio chunk on queue: {e_put}")
-                            self._stop_event.set() # Signal stop
-                            break
+                            _LOGGER.error(f"Audio Capture Loop: Error putting audio chunk on queue: {e_put}")
+                            return
 
                 if self._stop_event.is_set() or not self.is_running: break
 
-        except StopIteration:
-            _LOGGER.info("RTSP stream ended (StopIteration).")
         except Exception as e_decode:
             if self.is_running and not self._stop_event.is_set(): # Log only if not intentional stop
-                _LOGGER.error(f"RTSP decode/resample loop failed: {e_decode}", exc_info=True)
+                self._stop_event.set()
+                _LOGGER.error(f"Audio Capture Loop: RTSP decode/resample loop failed {e_decode}", exc_info=True)
         finally:
-            _LOGGER.info("Blocking RTSP audio capture loop finished.")
-            if self.is_running and not self._stop_event.is_set():
-                try:
-                    self.hass.loop.call_soon_threadsafe(self._audio_queue.put_nowait, None)
-                    _LOGGER.debug("Attempted to put sentinel (None) on audio queue from capture loop finally.")
-                except asyncio.QueueFull:
-                    _LOGGER.warning(
-                        "Audio queue was full when trying to put sentinel (None) "
-                        "from capture loop's finally block. Consumer (_send_realtime_task) might be stuck or stopped."
-                    )
-                except Exception as e_put_final:
-                    _LOGGER.error(
-                        f"Unexpected error putting sentinel (None) on queue "
-                        f"from capture loop's finally block: {e_put_final}"
-                    )
+            _LOGGER.info("Audio Capture Loop: Blocking RTSP loop finished.")
+            self.container.close()
 
     async def _audio_capture_task_launcher(self) -> None:
         """Async task to launch the blocking audio capture loop in an executor."""
-        if not self.stream_url:
-            _LOGGER.info("No stream URL, skipping audio capture task.")
-            return
-
-        _LOGGER.info("Launching blocking audio capture in executor.")
-        # `_blocking_audio_capture_loop` is a synchronous method
-        self._audio_capture_executor_future = self.hass.loop.run_in_executor(
-            None, self._audio_capture_loop
-        )
         try:
-            await self._audio_capture_executor_future
-            _LOGGER.info("Blocking audio capture executor job completed.")
-        except asyncio.CancelledError:
-            _LOGGER.info("Audio capture launcher task cancelled, ensuring executor future is cancelled.")
-            if self._audio_capture_executor_future:
-                self._audio_capture_executor_future.cancel() # Attempt to cancel if it's still running
-            raise # Re-raise CancelledError
+            while True:
+                if self._stop_event.is_set():
+                    _LOGGER.info("Audio Task: Stopped.")
+                    return
+
+                if not self.stream_url:
+                    _LOGGER.info("No stream URL, skipping audio capture task.")
+                    return
+                else:
+                    open_success = await self.hass.async_add_executor_job(
+                        self.open, self.stream_url
+                    )
+                    if not open_success:
+                        _LOGGER.error("Failed to open AV stream.")
+                        await self.async_stop(called_from_start_failure=True)
+                        return
+
+                _LOGGER.info("Audio Task: Launching blocking audio capture in executor.")
+                self._audio_capture_executor_future = self.hass.loop.run_in_executor(
+                    None, self._audio_capture_loop   # synchronous method
+                )
+
+                await self._audio_capture_executor_future
+                _LOGGER.info("Audio Task: Blocking audio capture executor job completed.")
+
+                while self.device.is_muted:
+                    if self._audio_capture_executor_future and not self._audio_capture_executor_future.done():
+                        self._audio_capture_executor_future.cancel()
+                    await self.on_muted()
+
         except Exception as e:
-            _LOGGER.error(f"Error in audio capture executor job: {e}", exc_info=True)
+            _LOGGER.error(f"Audio Task: Error in audio capture executor job ~ {e}", exc_info=True)
 
 
     async def _receive_audio_task(self) -> None:
@@ -323,17 +305,10 @@ class StreamAssistSatellite():
                 self._session_manager = client.aio.live.connect(model=CONF_CHAT_MODEL, config=CONFIG_RESPONSE)
                 self.session = await self._session_manager.__aenter__()
 
-                # Initialize RTSP capture if URL provided
-                if self.stream_url:
-                    open_success = await self.hass.async_add_executor_job(
-                        self.open, self.stream_url
-                    )
-
-                    if not open_success:
-                        _LOGGER.error("Failed to open AV stream.")
-                        await self.async_stop(called_from_start_failure=True)
-                        return
-
+                # Check stream availability
+                if not self.stream_url:
+                   _LOGGER.error("Async Start: No stream url provided")
+                   raise
 
                 # Create background tasks
                 task_configs = []
@@ -426,3 +401,11 @@ class StreamAssistSatellite():
 
         _LOGGER.info("StreamAssistSatellite stopped.")
         self.is_running = False
+
+
+    async def run(self):
+        _LOGGER.info(f"StreamAssistSatellite.run() called. Device active: {self.device.is_active}")
+        if self.device.is_active:
+            await self.async_start() # Add await here
+        else:
+            await self.async_stop()  # Add await here

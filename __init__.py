@@ -62,6 +62,7 @@ async def async_setup_entry(
     await hass.config_entries.async_forward_entry_setups(entry, SATELLITE_PLATFORMS)
 
     stream = StreamAssistSatellite(hass, item.device, entry)
+    await stream.run()
 
 
     return True
