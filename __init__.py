@@ -2,21 +2,20 @@ from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers import config_validation as cv, device_registry as dr
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.entity_platform import async_get_platforms
 from homeassistant.const import Platform
 
 import logging
 from .const import DOMAIN
-from .audio_processor import StreamAssistSatellite
+from .audio_processor import GeminiLiveSatellite
 from .models import DomainDataItem
-from .devices import StreamAssistDevice
+from .devices import GeminiLiveDevice
 
 CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
 _LOGGER = logging.getLogger(__name__)
 
 SATELLITE_PLATFORMS = [
     Platform.SWITCH,
+    Platform.BINARY_SENSOR,
 ]
 
 
@@ -49,19 +48,19 @@ async def async_setup_entry(
     device = dev_reg.async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, processor_id)},
-        name="satellite_info.name",  # Replace with real config if needed
+        name="GeminiLiveSatellite",
         suggested_area="Bedroom",
     )
 
     # Store device information
-    item.device = StreamAssistDevice(
+    item.device = GeminiLiveDevice(
         processor_id=processor_id,
         device_id=device.id,
     )
     # Set up satellite entity, sensors, switches, etc.
     await hass.config_entries.async_forward_entry_setups(entry, SATELLITE_PLATFORMS)
 
-    stream = StreamAssistSatellite(hass, item.device, entry)
+    stream = GeminiLiveSatellite(hass, item.device, entry)
     await stream.run()
 
 

@@ -12,7 +12,7 @@ from homeassistant.helpers import restore_state
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import DOMAIN
-from .entity import StreamAssistEntity
+from .entity import GeminiLiveEntity
 
 if TYPE_CHECKING:
     from .models import DomainDataItem
@@ -30,14 +30,14 @@ async def async_setup_entry(
     assert item.device is not None
 
     async_add_entities([
-        StreamAssistMuteSwitch(item.device),
-        StreamAssistPowerSwitch(item.device)
+        GeminiLiveMuteSwitch(item.device),
+        GeminiLivePowerSwitch(item.device)
 
     ])
 
 
-class StreamAssistMuteSwitch(
-    StreamAssistEntity, restore_state.RestoreEntity, SwitchEntity
+class GeminiLiveMuteSwitch(
+    GeminiLiveEntity, restore_state.RestoreEntity, SwitchEntity
 ):
     """Entity to represent if satellite is muted."""
 
@@ -70,8 +70,8 @@ class StreamAssistMuteSwitch(
         self._device.set_is_muted(False)
 
 
-class StreamAssistPowerSwitch(
-    StreamAssistEntity, restore_state.RestoreEntity, SwitchEntity
+class GeminiLivePowerSwitch(
+    GeminiLiveEntity, restore_state.RestoreEntity, SwitchEntity
 ):
     """Entity to represent if satellite is muted."""
 
@@ -89,16 +89,16 @@ class StreamAssistPowerSwitch(
 
         # Default to off
         self._attr_is_on = (state is not None) and (state.state == STATE_ON)
-        self._device.set_is_active(self._attr_is_on)
+        self._device.set_is_power(self._attr_is_on)
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn on."""
         self._attr_is_on = True
         self.async_write_ha_state()
-        self._device.set_is_active(True)
+        self._device.set_is_power(True)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off."""
         self._attr_is_on = False
         self.async_write_ha_state()
-        self._device.set_is_active(False)
+        self._device.set_is_power(False)

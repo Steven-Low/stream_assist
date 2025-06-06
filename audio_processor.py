@@ -15,49 +15,52 @@ from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 
 from .const import SAMPLE_CHANNELS, SAMPLE_RATE, SAMPLE_WIDTH, DOMAIN, CONF_CHAT_MODEL
-from .devices import StreamAssistDevice
+from .devices import GeminiLiveDevice
 
 
 _LOGGER = logging.getLogger(__name__)
 CHUNK_BYTE_SIZE = SAMPLE_CHANNELS * 1024 * 2
 CONFIG_RESPONSE = {"response_modalities": ["TEXT"]}
 
-class StreamAssistSatellite():
+class GeminiLiveSatellite():
 
     # entity_description.key = "stream_satellite"
     _attr_translation_key = "stream_satellite"
     _attr_name = None
 
-    def __init__(self, hass: HomeAssistant, device: StreamAssistDevice, config: ConfigEntry):
+    def __init__(self, hass: HomeAssistant, device: GeminiLiveDevice, config: ConfigEntry):
 
+        # Core
         self.hass = hass
         self.device = device
         self.config = config
-
-        self.is_running = True
-
-        self._tasks: set[asyncio.Task] | None = set()
-        self.session = None
-        self.container: InputContainer | None = None
-        self.audio_resampler: AudioResampler = None
-        self._stop_event = asyncio.Event()
-        self._muted_changed_event = asyncio.Event()
-        self._power_changed_event = asyncio.Event()
-
         self.stream_url = self.config.data.get("stream_url")
         self.api_key = self.config.data.get("api_key")
 
-        self._session_manager = None
+        # State
+        self.is_running = True
+
+        # Async / Concurrency
+        self._stop_event = asyncio.Event()
+        self._muted_changed_event = asyncio.Event()
+        self._power_changed_event = asyncio.Event()
         self._session_lock = asyncio.Lock()
-
-        # Communication queues
+        self._tasks: set[asyncio.Task] = set()
         self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=5)
-        # self.input_queue = asyncio.Queue(maxsize=10)
 
-        # Listener
-        self.device.set_is_muted_listener(self._muted_changed)
-        self.device.set_is_active_listener(self._power_changed)
+        # Streaming
+        self.session = None
+        self.container: InputContainer | None = None
+        self.audio_resampler: AudioResampler = None
         self._audio_capture_executor_future = None
+
+        # Internal session manager
+        self._session_manager = None
+
+        # Listeners
+        self.device.set_is_muted_listener(self._muted_changed)
+        self.device.set_is_power_listener(self._power_changed)
+
 
     def _muted_changed(self) -> None:
         """Run when device muted status changes."""
@@ -77,7 +80,7 @@ class StreamAssistSatellite():
 
     def _power_changed(self) -> None:
         """Run when device power status changes."""
-        if self.device.is_active:
+        if self.device.is_power:
             if not self.is_running:
                 self._power_changed_event.set()
                 self.is_running = True
@@ -182,6 +185,7 @@ class StreamAssistSatellite():
 
         try:
             _LOGGER.info("Starting RTSP audio capture task")
+
             audio_buffer = bytearray()
 
             for frame in self.container.decode(audio=0):
@@ -228,6 +232,7 @@ class StreamAssistSatellite():
             _LOGGER.info("Audio Capture Loop: Blocking RTSP loop finished.")
             self.container.close()
 
+
     async def _audio_capture_task_launcher(self) -> None:
         """Async task to launch the blocking audio capture loop in an executor."""
         try:
@@ -247,6 +252,8 @@ class StreamAssistSatellite():
                         _LOGGER.error("Failed to open AV stream.")
                         await self.async_stop(called_from_start_failure=True)
                         return
+                    else:
+                        self.device.set_is_active(True)
 
                 _LOGGER.info("Audio Task: Launching blocking audio capture in executor.")
                 self._audio_capture_executor_future = self.hass.loop.run_in_executor(
@@ -255,6 +262,9 @@ class StreamAssistSatellite():
 
                 await self._audio_capture_executor_future
                 _LOGGER.info("Audio Task: Blocking audio capture executor job completed.")
+
+                if self.device.is_muted:
+                    self.device.set_is_active(False)
 
                 while self.device.is_muted:
                     if self._audio_capture_executor_future and not self._audio_capture_executor_future.done():
@@ -304,6 +314,9 @@ class StreamAssistSatellite():
 
                 self._session_manager = client.aio.live.connect(model=CONF_CHAT_MODEL, config=CONFIG_RESPONSE)
                 self.session = await self._session_manager.__aenter__()
+
+                # if self.session:
+                #     self.device.set_is_active(True)
 
                 # Check stream availability
                 if not self.stream_url:
@@ -377,6 +390,7 @@ class StreamAssistSatellite():
             finally:
                 self._session_manager = None
                 self.session = None
+                self.device.set_is_active(False)
 
         # Close RTSP stream container (blocking call)
         if self.container:
@@ -399,13 +413,13 @@ class StreamAssistSatellite():
                 break
         _LOGGER.info("Audio queue cleared.")
 
-        _LOGGER.info("StreamAssistSatellite stopped.")
+        _LOGGER.info("GeminiLiveSatellite stopped.")
         self.is_running = False
 
 
     async def run(self):
-        _LOGGER.info(f"StreamAssistSatellite.run() called. Device active: {self.device.is_active}")
-        if self.device.is_active:
+        _LOGGER.info(f"StreamAssistSatellite.run() called. Device active: {self.device.is_power}")
+        if self.device.is_power:
             await self.async_start() # Add await here
         else:
             await self.async_stop()  # Add await here

@@ -16,6 +16,11 @@
 
   },
   "entity": {
+    "binary_sensor": {
+      "assist_live_in_progress": {
+        "name": "Assist Live in Progress"
+      }
+    },
 
     "switch": {
       "mute": {
