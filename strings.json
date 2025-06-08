@@ -3,10 +3,10 @@
       "step": {
         "user": {
           "data": {
-            "url": "Url",
+            "stream_url": "Stream Url (RTSP/RTMP/HTTP)",
             "api_key": "Api Key"
-
-          }
+          },
+          "description": "Setup Gemini Live Satellite"
         }
 
       },
@@ -15,10 +15,28 @@
       }
 
     },
+    "options": {
+      "step":{
+        "init":{
+          "description": "Configure Gemini Live Options",
+          "data": {
+            "stream_url": "Stream Url",
+            "media_player_entity_id": "Media Player for Audio Output",
+            "external_url": "HA External Url (for tts audio)"
+          }
+        }
+      }
+
+    },
     "entity": {
       "binary_sensor": {
         "assist_live_in_progress": {
           "name": "Assist Live in Progress"
+        }
+      },
+      "sensor": {
+        "response_text": {
+          "name": "Response Text"
         }
       },
 

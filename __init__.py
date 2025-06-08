@@ -16,6 +16,7 @@ _LOGGER = logging.getLogger(__name__)
 SATELLITE_PLATFORMS = [
     Platform.SWITCH,
     Platform.BINARY_SENSOR,
+    Platform.SENSOR,
 ]
 
 
@@ -72,8 +73,32 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
     await hass.config_entries.async_reload(entry.entry_id)
 
 
+# async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+#     """Unload the config entry and clean up."""
+#     if entry.entry_id in hass.data.get(DOMAIN, {}):
+#         del hass.data[DOMAIN][entry.entry_id]
+#     return True
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload the config entry and clean up."""
-    if entry.entry_id in hass.data.get(DOMAIN, {}):
-        del hass.data[DOMAIN][entry.entry_id]
+    """Unload a config entry."""
+    _LOGGER.info(f"Unloading config entry {entry.entry_id} for domain {DOMAIN}")
+
+    # TODO: Put Satellite on Data Item
+    # item: DomainDataItem | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    # if item and hasattr(item, 'satellite') and item.satellite:
+    #     _LOGGER.info(f"Stopping satellite processor for entry {entry.entry_id}.")
+    #     await item.satellite.async_stop()
+
+    _LOGGER.debug(f"Unloading platforms {SATELLITE_PLATFORMS} for entry {entry.entry_id}")
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, SATELLITE_PLATFORMS)
+
+    if unload_ok:
+        if DOMAIN in hass.data and entry.entry_id in hass.data[DOMAIN]:
+            hass.data[DOMAIN].pop(entry.entry_id)
+            _LOGGER.info(f"Successfully unloaded and cleaned up data for entry {entry.entry_id}.")
+        else:
+            _LOGGER.warning(f"Domain data for entry {entry.entry_id} not found during unload.")
+    else:
+        _LOGGER.error(f"Failed to cleanly unload one or more platforms for entry {entry.entry_id}. This may cause issues on reload.")
+        return False
     return True

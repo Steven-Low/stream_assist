@@ -7,20 +7,38 @@ import os
 import uuid
 import io
 import wave
+import base64
 from datetime import datetime, timedelta
 from functools import partial
 import google.genai as genai
+from google.genai import types
+from collections import deque
 
+from homeassistant.const import ATTR_ENTITY_ID, CONF_EXTERNAL_URL
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.helpers.network import get_url
+from homeassistant.components.media_player import (
+    DOMAIN as MEDIA_PLAYER_DOMAIN,
+    SERVICE_PLAY_MEDIA,
+)
 
-from .const import SAMPLE_CHANNELS, SAMPLE_RATE, SAMPLE_WIDTH, DOMAIN, CONF_CHAT_MODEL
+from .const import SAMPLE_CHANNELS, SAMPLE_RATE, SAMPLE_WIDTH, DOMAIN, CONF_CHAT_MODEL, CONF_MEDIA_PLAYER
 from .devices import GeminiLiveDevice
 
 
 _LOGGER = logging.getLogger(__name__)
 CHUNK_BYTE_SIZE = SAMPLE_CHANNELS * 1024 * 2
-CONFIG_RESPONSE = {"response_modalities": ["TEXT"]}
+API_VERSION = "v1beta"
+CONFIG_RESPONSE = {
+    "response_modalities": ["AUDIO"],
+}
+# To enable proactivity, set api_version to v1alpha in client
+# CONFIG = types.LiveConnectConfig(
+#     response_modalities=["AUDIO"],
+#     proactivity={'proactive_audio': True}
+# )
+
 
 class GeminiLiveSatellite():
 
@@ -34,8 +52,10 @@ class GeminiLiveSatellite():
         self.hass = hass
         self.device = device
         self.config = config
-        self.stream_url = self.config.data.get("stream_url")
+        self.stream_url = None
         self.api_key = self.config.data.get("api_key")
+        self.media_player_entity_id: str | None = None
+        self.external_url = self.config.options.get(CONF_EXTERNAL_URL)
 
         # State
         self.is_running = True
@@ -47,6 +67,7 @@ class GeminiLiveSatellite():
         self._session_lock = asyncio.Lock()
         self._tasks: set[asyncio.Task] = set()
         self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=5)
+        self._current_audio_buffer = bytearray()
 
         # Streaming
         self.session = None
@@ -61,6 +82,15 @@ class GeminiLiveSatellite():
         self.device.set_is_muted_listener(self._muted_changed)
         self.device.set_is_power_listener(self._power_changed)
 
+        # self.config.add_update_listener(self._async_options_updated_callback)
+
+
+    async def _async_options_updated_callback(self, hass:HomeAssistant, entry: ConfigEntry) -> None:
+        self._update_media_player_config()
+
+    def _update_media_player_config(self) -> None:
+        self.media_player_entity_id = self.config.options.get(CONF_MEDIA_PLAYER)
+        _LOGGER.info(f"Media player for audio output updated to: {self.media_player_entity_id}")
 
     def _muted_changed(self) -> None:
         """Run when device muted status changes."""
@@ -127,18 +157,6 @@ class GeminiLiveSatellite():
             return False
 
 
-    @staticmethod
-    async def convert_raw_to_wav(audio_data: bytes) -> bytes:
-        """Convert PCM raw audio to WAV bytes in memory."""
-        buffer = io.BytesIO()
-        with wave.open(buffer, 'wb') as wf:
-            wf.setnchannels(SAMPLE_CHANNELS)
-            wf.setsampwidth(SAMPLE_WIDTH)
-            wf.setframerate(SAMPLE_RATE)
-            wf.writeframes(audio_data)
-        return buffer.getvalue()
-
-
     async def _send_realtime_task(self):
         _LOGGER.info("Starting send_realtime_task")
         try:
@@ -198,29 +216,30 @@ class GeminiLiveSatellite():
                 for resampled_frame in resampled_frames:
                     # Convert frame to raw PCM bytes
                     pcm_data = resampled_frame.to_ndarray().tobytes()
-                    audio_buffer.extend(pcm_data)
 
-                    # Process full chunks from the buffer
-                    while len(audio_buffer) >= CHUNK_BYTE_SIZE:
+                    # audio_buffer.extend(pcm_data)
 
-                        chunk = bytes(audio_buffer[:CHUNK_BYTE_SIZE])
-                        del audio_buffer[:CHUNK_BYTE_SIZE]
+                    # # Process full chunks from the buffer
+                    # while len(audio_buffer) >= CHUNK_BYTE_SIZE:
 
-                        future = asyncio.run_coroutine_threadsafe(
-                            self._audio_queue.put({"data": chunk,"mime_type": "audio/pcm",}),
-                            self.hass.loop
-                        )
+                    #     chunk = bytes(audio_buffer[:CHUNK_BYTE_SIZE])
+                    #     del audio_buffer[:CHUNK_BYTE_SIZE]
 
-                        try:
-                            future.result(timeout=2) # Wait for put to complete within 2s
-                        except asyncio.QueueFull:
-                            _LOGGER.warning("Audio Capture Loop: Audio queue full dropping audio chunk")
-                        except asyncio.TimeoutError:
-                            _LOGGER.warning("Audio Capture Loop: Timeout putting audio chunk on queue.")
-                            return
-                        except Exception as e_put:
-                            _LOGGER.error(f"Audio Capture Loop: Error putting audio chunk on queue: {e_put}")
-                            return
+                    future = asyncio.run_coroutine_threadsafe(
+                        self._audio_queue.put({"data": pcm_data,"mime_type": "audio/pcm",}),
+                        self.hass.loop
+                    )
+
+                    try:
+                        future.result(timeout=3) # Wait for put to complete within 2s
+                    except asyncio.QueueFull:
+                        _LOGGER.warning("Audio Capture Loop: Audio queue full dropping audio chunk")
+                    except asyncio.TimeoutError:
+                        _LOGGER.warning("Audio Capture Loop: Timeout putting audio chunk on queue.")
+                        return
+                    except Exception as e_put:
+                        _LOGGER.error(f"Audio Capture Loop: Error putting audio chunk on queue: {e_put}")
+                        return
 
                 if self._stop_event.is_set() or not self.is_running: break
 
@@ -241,6 +260,7 @@ class GeminiLiveSatellite():
                     _LOGGER.info("Audio Task: Stopped.")
                     return
 
+                self.stream_url = self.config.options.get("stream_url", self.config.data.get("stream_url"))
                 if not self.stream_url:
                     _LOGGER.info("No stream URL, skipping audio capture task.")
                     return
@@ -250,7 +270,9 @@ class GeminiLiveSatellite():
                     )
                     if not open_success:
                         _LOGGER.error("Failed to open AV stream.")
-                        await self.async_stop(called_from_start_failure=True)
+                        self._stop_event.set()
+                        self.is_running = False
+                        self.device.set_is_active(False)
                         return
                     else:
                         self.device.set_is_active(True)
@@ -273,27 +295,126 @@ class GeminiLiveSatellite():
 
         except Exception as e:
             _LOGGER.error(f"Audio Task: Error in audio capture executor job ~ {e}", exc_info=True)
-
+            raise
 
     async def _receive_audio_task(self) -> None:
         """Task to process audio responses from Gemini."""
         if not self.session:
             return
 
+        self._update_media_player_config()
+
         _LOGGER.info("Starting audio receive task")
+        sentence_buffer = ""
+        sentence_endings = (".", "!", "?")
+        sentence_queue = deque(maxlen=1)  # store up to 3 lines
+        self._current_audio_buffer.clear()
+
         try:
             while self.is_running and self.session:
                 async for response in self.session.receive():
-                    if not self.is_running: break
+                    if not self.is_running:
+                        break
+
                     if audio_data := response.data:
-                        _LOGGER.info("Received audio: ignored now")
-                    if text := response.text:
-                        _LOGGER.info(f"Received text: {text}")
+                        self._current_audio_buffer.extend(audio_data)
+
+
+                if self._current_audio_buffer:
+                    await self._play_audio(bytes(self._current_audio_buffer))
+                    self._current_audio_buffer.clear()
+                    _LOGGER.info("finished playing")
+
+                    # if text := response.text:
+                    #     sentence_buffer += text
+                    #     _LOGGER.info(f"{text}")
+
+                    #     if sentence_buffer.strip().endswith(sentence_endings):
+                    #         final_sentence = sentence_buffer.strip()
+                    #         sentence_queue.append(final_sentence)
+                    #         sentence_buffer = ""  # clear buffer
+
+                    #         # Join last 3 sentences with newlines
+                    #         full_output = "\n".join(sentence_queue)
+
+                    #         if sensor := self.hass.data[DOMAIN].get("response_text"):
+                    #             sensor.update_text(full_output)
+
         except asyncio.CancelledError:
             if self.is_running:
                 _LOGGER.info("Audio receive task cancelled")
+        except Exception as e:
+            _LOGGER.info(f"Receive Task: {e}")
         finally:
             _LOGGER.info("Receive response task finished.")
+
+    async def _play_audio_task(self) -> None:
+        pass
+
+    @staticmethod
+    async def convert_raw_to_wav(audio_data: bytes) -> bytes:
+        """Convert PCM raw audio to WAV bytes in memory."""
+        buffer = io.BytesIO()
+        with wave.open(buffer, 'wb') as wf:
+            wf.setnchannels(SAMPLE_CHANNELS)
+            wf.setsampwidth(SAMPLE_WIDTH)
+            wf.setframerate(SAMPLE_RATE)
+            wf.writeframes(audio_data)
+        return buffer.getvalue()
+
+    async def _play_audio(self, audio_bytes: bytes) -> None:
+        """Plays the accumulated audio data on the configured media_player."""
+        if not self.media_player_entity_id:
+            _LOGGER.warning("No media_player_entity_id configured. Cannot play audio.")
+            return
+        if not audio_bytes:
+            _LOGGER.debug("No audio data in buffer to play.")
+            return
+
+        _LOGGER.info(f"Attempting to play {len(audio_bytes)} bytes of audio on: {self.media_player_entity_id}")
+
+        try:
+            wav_bytes = await self.convert_raw_to_wav(audio_bytes)
+
+            output_dir = self.hass.config.path("www")  # <config_dir>/www
+            file_id = f"gemini_tts_{uuid.uuid4().hex}.wav"
+            file_path_on_disk = os.path.join(output_dir, file_id)
+
+            def save_wav_to_file_sync(path: str, data: bytes):
+                with open(path, "wb") as f:
+                    f.write(data)
+
+            await self.hass.async_add_executor_job(
+                partial(save_wav_to_file_sync, path=file_path_on_disk, data=wav_bytes)
+            )
+            _LOGGER.info(f"Audio saved to temporary file: {file_path_on_disk}")
+
+            media_url_path = f"/local/{file_id}"
+            full_media_url = f"{self.external_url}{media_url_path}" #get_url(self.hass, prefer_external=False)
+
+            _LOGGER.info(f"Playing audio from URL: {full_media_url}") # Or media_url_path
+
+            media_content_id = full_media_url
+            media_content_type = "music" # Or MediaType.AUDIO
+
+            await self.hass.services.async_call(
+                MEDIA_PLAYER_DOMAIN,
+                SERVICE_PLAY_MEDIA,
+                {
+                    ATTR_ENTITY_ID: self.media_player_entity_id,
+                    "media_content_id": media_content_id,
+                    "media_content_type": media_content_type,
+                    # Consider "enqueue: replace" if you want to interrupt previous playback
+                    # "enqueue": "replace",
+                },
+                blocking=False, # Usually False for TTS-like playback
+            )
+            _LOGGER.debug(f"Play_media called for {self.media_player_entity_id}")
+
+        except wave.Error as e:
+            _LOGGER.error(f"Error creating WAV data for media player: {e}", exc_info=True)
+        except Exception as e:
+            _LOGGER.error(f"Error playing audio on media_player: {e}", exc_info=True)
 
 
     async def async_start(self):
@@ -309,7 +430,7 @@ class GeminiLiveSatellite():
 
             try:
                 client = await self.hass.async_add_executor_job(
-                    lambda: genai.Client(api_key=self.api_key, http_options={"api_version": "v1beta"})
+                    lambda: genai.Client(api_key=self.api_key, http_options={"api_version": API_VERSION})
                 )
 
                 self._session_manager = client.aio.live.connect(model=CONF_CHAT_MODEL, config=CONFIG_RESPONSE)
@@ -317,11 +438,6 @@ class GeminiLiveSatellite():
 
                 # if self.session:
                 #     self.device.set_is_active(True)
-
-                # Check stream availability
-                if not self.stream_url:
-                   _LOGGER.error("Async Start: No stream url provided")
-                   raise
 
                 # Create background tasks
                 task_configs = []
